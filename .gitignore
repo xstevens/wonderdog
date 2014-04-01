@@ -1,10 +1,4 @@
-
-
-
-
-
-
-
+*.iml
 *.log
 *.o
 *.pyc
@@ -19,6 +13,7 @@
 .\#*
 .bzr
 .hg
+.idea
 .project
 .pydevproject
 .settings

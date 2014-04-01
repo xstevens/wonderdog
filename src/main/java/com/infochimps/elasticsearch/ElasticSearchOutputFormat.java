@@ -1,43 +1,40 @@
 package com.infochimps.elasticsearch;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.Random;
-import java.net.URI;
-
+import com.infochimps.elasticsearch.hadoop.util.HadoopUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-
 import org.apache.hadoop.conf.Configurable;
-import org.apache.hadoop.io.*;
-import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.JobContext;
-import org.apache.hadoop.mapreduce.RecordWriter;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapreduce.Counter;
-import org.apache.hadoop.mapreduce.OutputFormat;
+import org.apache.hadoop.io.ArrayWritable;
+import org.apache.hadoop.io.BooleanWritable;
+import org.apache.hadoop.io.DoubleWritable;
+import org.apache.hadoop.io.FloatWritable;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.MapWritable;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.OutputCommitter;
-import org.apache.hadoop.filecache.DistributedCache;
-
-import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.common.xcontent.XContentFactory;
-import org.elasticsearch.node.Node;
-import org.elasticsearch.node.NodeBuilder;
+import org.apache.hadoop.mapreduce.OutputFormat;
+import org.apache.hadoop.mapreduce.RecordWriter;
+import org.apache.hadoop.mapreduce.TaskAttemptContext;
+import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.action.admin.indices.alias.IndicesAliasesRequestBuilder;
+import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.action.bulk.BulkResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.Requests;
-import org.elasticsearch.action.bulk.BulkRequestBuilder;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.indices.IndexAlreadyExistsException;
-import org.elasticsearch.action.bulk.BulkResponse;
-import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.node.Node;
+import org.elasticsearch.node.NodeBuilder;
 
-import com.infochimps.elasticsearch.hadoop.util.HadoopUtils;
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
 
@@ -48,6 +45,16 @@ import com.infochimps.elasticsearch.hadoop.util.HadoopUtils;
 public class ElasticSearchOutputFormat extends OutputFormat<NullWritable, MapWritable> implements Configurable {
 
     static Log LOG = LogFactory.getLog(ElasticSearchOutputFormat.class);
+
+    public static final String ES_INDEX_NAME = "elasticsearch.index.name";
+    public static final String ES_INDEX_ALIASES = "elasticsearch.index.aliases";
+    public static final String ES_BULK_SIZE = "elasticsearch.bulk.size";
+    public static final String ES_ID_FIELD_NAME = "elasticsearch.id.field.name";
+    public static final String ES_ID_FIELD = "elasticsearch.id.field";
+    public static final String ES_OBJECT_TYPE = "elasticsearch.object.type";
+    public static final String ES_CONFIG = "es.config";
+    public static final String ES_PLUGINS = "es.path.plugins";
+
     private Configuration conf = null;
 
     protected class ElasticSearchRecordWriter extends RecordWriter<NullWritable, MapWritable> {
@@ -55,6 +62,7 @@ public class ElasticSearchOutputFormat extends OutputFormat<NullWritable, MapWri
         private Node node;
         private Client client;
         private String indexName;
+        private String[] aliases;
         private int bulkSize;
         private int idField;
         private String idFieldName;
@@ -64,20 +72,12 @@ public class ElasticSearchOutputFormat extends OutputFormat<NullWritable, MapWri
         // Used for bookkeeping purposes
         private AtomicLong totalBulkTime  = new AtomicLong();
         private AtomicLong totalBulkItems = new AtomicLong();
-        private Random     randgen        = new Random();
         private long       runStartTime   = System.currentTimeMillis();
         private long       lastLogTime    = 0;
 
         // For hadoop configuration
         private static final String ES_CONFIG_NAME = "elasticsearch.yml";
         private static final String ES_PLUGINS_NAME = "plugins";
-        private static final String ES_INDEX_NAME = "elasticsearch.index.name";
-        private static final String ES_BULK_SIZE = "elasticsearch.bulk.size";
-        private static final String ES_ID_FIELD_NAME = "elasticsearch.id.field.name";
-        private static final String ES_ID_FIELD = "elasticsearch.id.field";
-        private static final String ES_OBJECT_TYPE = "elasticsearch.object.type";
-        private static final String ES_CONFIG = "es.config";
-        private static final String ES_PLUGINS = "es.path.plugins";
 
         // Other string constants
         private static final String COMMA = ",";
@@ -110,6 +110,9 @@ public class ElasticSearchOutputFormat extends OutputFormat<NullWritable, MapWri
         public ElasticSearchRecordWriter(TaskAttemptContext context) {
             Configuration conf = context.getConfiguration();
             this.indexName = conf.get(ES_INDEX_NAME);
+            if (conf.get(ES_INDEX_ALIASES) != null) {
+                this.aliases = conf.get(ES_INDEX_ALIASES).split(COMMA);
+            }
             this.bulkSize = Integer.parseInt(conf.get(ES_BULK_SIZE));
             this.idFieldName = conf.get(ES_ID_FIELD_NAME);
             if (idFieldName.equals(NO_ID_FIELD)) {
@@ -253,6 +256,13 @@ public class ElasticSearchOutputFormat extends OutputFormat<NullWritable, MapWri
             LOG.info("Initializing index");
             try {
                 client.admin().indices().prepareCreate(indexName).execute().actionGet();
+                if (aliases != null && aliases.length > 0) {
+                    IndicesAliasesRequestBuilder aliasesRequestBuilder = client.admin().indices().prepareAliases();
+                    for (String alias : aliases) {
+                        aliasesRequestBuilder.addAlias(indexName, alias);
+                    }
+                    aliasesRequestBuilder.get("5s");
+                }
             } catch (Exception e) {
                 if (ExceptionsHelper.unwrapCause(e) instanceof IndexAlreadyExistsException) {
                     LOG.warn("Index ["+indexName+"] already exists");
